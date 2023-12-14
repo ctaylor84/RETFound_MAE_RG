@@ -4,16 +4,56 @@
 # --------------------------------------------------------
 
 import os
+from typing import Any, Callable, List, Optional, Tuple
 from torchvision import datasets, transforms
 from timm.data import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+import pandas as pd
 
+class RegressionDataset(datasets.VisionDataset):
+    def __init__(
+        self, 
+        root: str, 
+        transform: Optional[Callable] = None,
+    ) -> None:
+        super().__init__(root, transform=transform)
+        self.samples = self.make_dataset(self.root)
+        self.loader = datasets.folder.default_loader
+
+    @staticmethod
+    def make_dataset(
+        directory: str,
+    ) -> List[Tuple[str, int]]:
+        directory = os.path.expanduser(directory)
+
+        targets_df = pd.read_csv(directory + ".csv", header=0,
+                                 dtype={"id": str, "target": float})
+        targets = dict(zip(targets_df["id"], targets_df["target"]))
+
+        instances = list()
+        for fname in os.listdir(directory):
+            path = os.path.join(directory, fname)
+            item = path, targets[fname[:fname.find(".")]]
+            instances.append(item)
+        
+        return instances
+    
+    def __getitem__(self, index: int) -> Tuple[Any, Any]:
+        path, target = self.samples[index]
+        sample = self.loader(path)
+        if self.transform is not None:
+            sample = self.transform(sample)
+        
+        return sample, target
+    
+    def __len__(self) -> int:
+        return len(self.samples)
 
 def build_dataset(is_train, args):
     
     transform = build_transform(is_train, args)
     root = os.path.join(args.data_path, is_train)
-    dataset = datasets.ImageFolder(root, transform=transform)
+    dataset = RegressionDataset(root, transform=transform)
 
     return dataset
 
