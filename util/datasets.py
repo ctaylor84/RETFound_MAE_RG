@@ -4,7 +4,8 @@
 # --------------------------------------------------------
 
 import os
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple, Dict
+import torch
 from torchvision import datasets, transforms
 from timm.data import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
@@ -12,31 +13,36 @@ import pandas as pd
 
 class RegressionDataset(datasets.VisionDataset):
     def __init__(
-        self, 
-        root: str, 
+        self,
+        root: str,
         transform: Optional[Callable] = None,
     ) -> None:
         super().__init__(root, transform=transform)
-        self.samples = self.make_dataset(self.root)
+        self.samples, self.norm_params = self.make_dataset(self.root)
         self.loader = datasets.folder.default_loader
 
     @staticmethod
     def make_dataset(
         directory: str,
-    ) -> List[Tuple[str, int]]:
+    ) -> Tuple[List[Tuple[str, int]], Dict[str, torch.Tensor]]:
         directory = os.path.expanduser(directory)
 
         targets_df = pd.read_csv(directory + ".csv", header=0,
-                                 dtype={"id": str, "target": float})
-        targets = dict(zip(targets_df["id"], targets_df["target"]))
+                                 dtype={"file": str, "target": float})
+        targets = dict(zip(targets_df["file"], targets_df["target"]))
 
         instances = list()
-        for fname in os.listdir(directory):
-            path = os.path.join(directory, fname)
-            item = path, targets[fname[:fname.find(".")]]
+        for target_file, target_value in targets.items():
+            path = os.path.join(directory, target_file)
+            item = path, target_value
             instances.append(item)
-        
-        return instances
+
+        target_values = torch.tensor(list(targets.values()))
+        dataset_mean = torch.mean(target_values)
+        dataset_std = torch.std(target_values)
+        norm_params = {"mean": dataset_mean, "std": dataset_std}
+
+        return instances, norm_params
     
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
         path, target = self.samples[index]

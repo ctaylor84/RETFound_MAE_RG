@@ -20,8 +20,8 @@ import numpy as np
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
-                    log_writer=None, args=None):
+                    device: torch.device, epoch: int, loss_scaler, norm_params,
+                    max_norm: float = 0, log_writer=None, args=None):
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -46,7 +46,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         with torch.cuda.amp.autocast():
             outputs = model(samples).squeeze()
-            loss = criterion(outputs, targets)
+            loss = criterion(outputs, (targets - norm_params["mean"]) / norm_params["std"])
 
         loss_value = loss.item()
 
@@ -90,7 +90,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, criterion, device, task, epoch, mode):
+def evaluate(data_loader, model, criterion, norm_params, device, task, epoch, mode):
     metric_logger = misc.MetricLogger(delimiter="  ")
     header = 'Test:'
     
@@ -112,8 +112,8 @@ def evaluate(data_loader, model, criterion, device, task, epoch, mode):
         # compute output
         with torch.cuda.amp.autocast():
             output = model(images).squeeze()
-            loss = criterion(output, target)
-            output_np = output.cpu().detach().numpy()
+            loss = criterion(output, (target - norm_params["mean"]) / norm_params["std"])
+            output_np = ((output * norm_params["std"]) + norm_params["mean"]).cpu().detach().numpy()
             target_np = target.cpu().detach().numpy()
             prediction_list.append(output_np)
             target_list.append(target_np)

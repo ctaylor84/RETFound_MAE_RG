@@ -149,6 +149,7 @@ def main(args):
     cudnn.benchmark = True
 
     dataset_train = build_dataset(is_train='train', args=args)
+    norm_params = dataset_train.norm_params
     dataset_val = build_dataset(is_train='val', args=args)
     dataset_test = build_dataset(is_train='test', args=args)
 
@@ -282,7 +283,8 @@ def main(args):
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     if args.eval:
-        test_stats, test_mse = evaluate(data_loader_test, model, criterion, device, args.task, epoch=0, mode='test')
+        test_stats, test_mse = evaluate(data_loader_test, model, criterion, norm_params, 
+                device, args.task, epoch=0, mode='test')
         exit(0)
 
     print(f"Start training for {args.epochs} epochs")
@@ -294,12 +296,14 @@ def main(args):
         train_stats = train_one_epoch(
             model, criterion, data_loader_train,
             optimizer, device, epoch, loss_scaler,
+            norm_params,
             args.clip_grad,
             log_writer=log_writer,
             args=args
         )
 
-        val_stats, val_mse = evaluate(data_loader_val, model, criterion, device,args.task,epoch, mode='val')
+        val_stats, val_mse = evaluate(data_loader_val, model, criterion, norm_params,
+                device, args.task, epoch, mode='val')
         if min_mse == None or val_mse < min_mse:
             min_mse = val_mse
             
@@ -310,7 +314,8 @@ def main(args):
         
 
         if epoch==(args.epochs-1):
-            test_stats, test_mse = evaluate(data_loader_test, model, criterion, device,args.task,epoch, mode='test')
+            test_stats, test_mse = evaluate(data_loader_test, model, criterion, norm_params,
+                    device, args.task, epoch, mode='test')
 
         
         if log_writer is not None:
