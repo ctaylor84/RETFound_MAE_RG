@@ -16,8 +16,6 @@ import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 
 import timm
-
-assert timm.__version__ == "0.3.2" # version check
 from timm.models.layers import trunc_normal_
 
 import util.lr_decay as lrd
@@ -59,14 +57,17 @@ def get_args_parser():
                         help='learning rate (absolute lr)')
     parser.add_argument('--blr', type=float, default=1e-3, metavar='LR',
                         help='base learning rate: absolute_lr = base_lr * total_batch_size / 256')
-    parser.add_argument('--layer_decay', type=float, default=0.75,
-                        help='layer-wise lr decay from ELECTRA/BEiT')
+    parser.add_argument('--layer_decay', type=float, default=None,
+                        help='layer-wise lr decay from ELECTRA/BEiT (default: None)')
 
     parser.add_argument('--min_lr', type=float, default=1e-6, metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0')
 
     parser.add_argument('--warmup_epochs', type=int, default=10, metavar='N',
                         help='epochs to warmup LR')
+    
+    parser.add_argument('--eps', type=float, default=1e-08,
+                        help='Optimizer EPS (default: 1e-08)')
 
     # Augmentation parameters
     parser.add_argument('--color_jitter', type=float, default=None, metavar='PCT',
@@ -134,6 +135,9 @@ def get_args_parser():
 
 
 def main(args):
+    if args.model == 'vit_large_patch16':
+        assert timm.__version__ == "0.3.2"
+
     misc.init_distributed_mode(args)
 
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
@@ -268,14 +272,18 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
 
-    # build optimizer with layer-wise lr decay (lrd)
-    param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay,
-        no_weight_decay_list=model_without_ddp.no_weight_decay(),
-        layer_decay=args.layer_decay
-    )
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
-    loss_scaler = NativeScaler()
+    if args.layer_decay is not None:
+        # build optimizer with layer-wise lr decay (lrd)
+        param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay,
+            no_weight_decay_list=model_without_ddp.no_weight_decay(),
+            layer_decay=args.layer_decay
+        )
+        optimizer = torch.optim.AdamW(param_groups, lr=args.lr, eps=args.eps)
+    else:
+        optimizer = torch.optim.AdamW(model_without_ddp.parameters(), lr=args.lr, eps=args.eps,
+                                      weight_decay=args.weight_decay)
 
+    loss_scaler = NativeScaler()
     criterion = torch.nn.MSELoss()
 
     print("criterion = %s" % str(criterion))
@@ -284,7 +292,7 @@ def main(args):
 
     if args.eval:
         test_stats, test_mse = evaluate(data_loader_test, model, criterion, norm_params, 
-                device, args.task, epoch=0, mode='test')
+                                        device, args.task, epoch=0, mode='test')
         exit(0)
 
     print(f"Start training for {args.epochs} epochs")
@@ -303,7 +311,7 @@ def main(args):
         )
 
         val_stats, val_mse = evaluate(data_loader_val, model, criterion, norm_params,
-                device, args.task, epoch, mode='val')
+                                      device, args.task, epoch, mode='val')
         if min_mse == None or val_mse < min_mse:
             min_mse = val_mse
             
@@ -315,7 +323,7 @@ def main(args):
 
         if epoch==(args.epochs-1):
             test_stats, test_mse = evaluate(data_loader_test, model, criterion, norm_params,
-                    device, args.task, epoch, mode='test')
+                                            device, args.task, epoch, mode='test')
 
         
         if log_writer is not None:

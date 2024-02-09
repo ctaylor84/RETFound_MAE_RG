@@ -53,3 +53,12 @@ def vit_large_patch16(**kwargs):
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
+def efficientnetv2_m(**kwargs):
+    model = timm.create_model("efficientnetv2_rw_m", pretrained=True,
+                              num_classes=kwargs["num_classes"])
+    return model
+
+def resnet50(**kwargs):
+    model = timm.create_model("resnet50", pretrained=True,
+                              num_classes=kwargs["num_classes"])
+    return model
