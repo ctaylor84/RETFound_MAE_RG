@@ -14,7 +14,7 @@ import util.lr_sched as lr_sched
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from pycm import *
 import numpy as np
-
+import matplotlib.pyplot as plt
 
 
 
@@ -87,6 +87,70 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
+def true_vs_pred_boxplot(plot_path, target_list, prediction_list):
+    value_max = round(np.amax(target_list))
+    value_min = round(np.amin(target_list))
+    total_bins = value_max - value_min
+    bins = np.arange(value_min, value_max+2, step=1.0) - 0.5
+    digitized = np.digitize(target_list, bins)
+    residuals_list = target_list - prediction_list
+
+    mean_x = np.arange(value_min, value_max-1)
+    bin_loss_means = [np.mean(residuals_list[digitized == i]) for i in range(1, total_bins)]
+    bin_pred_means = [np.mean(prediction_list[digitized == i]) for i in range(1, total_bins)]
+    box_bins_loss = [residuals_list[digitized == i] for i in range(1, total_bins)]
+    box_bins_pred = [prediction_list[digitized == i] for i in range(1, total_bins)]
+    box_bins_counts = [target_list[digitized == i].shape[0] for i in range(1, total_bins)]
+    box_bin_x = list(range(1, total_bins))
+
+    box_labels = ["" if int(x) % 5 != 0 else str(x) for x in mean_x]
+    fig = plt.figure(figsize=(12,8))
+    ax = fig.add_subplot(111)
+    ax.boxplot(box_bins_loss, positions=box_bin_x, widths=0.5, flierprops=dict({"markersize":3}))
+    ax.set_xticks(ticks=box_bin_x)
+    ax.set_xticklabels(labels=box_labels)
+    ax.plot(box_bin_x, bin_loss_means, c="blue")
+    ax.plot(box_bin_x, np.zeros(len(box_bin_x)), c="red")
+    ax.set_xlabel("True value (years)")
+    ax.set_ylabel("Residual (years)")
+    ax.tick_params(axis="x", which="minor", bottom=False)
+    ax2 = ax.twinx()
+    ax2.plot(box_bin_x, box_bins_counts, c="green")
+    ax2.set_ylabel("Number of samples")
+    ax2.yaxis.get_ticklocs(minor=True)
+    ax2.minorticks_on()
+    ax2.tick_params(axis="x", which="minor", bottom=False)
+    plt.tight_layout()
+    plt.savefig(plot_path + 'residuals.jpg', dpi=600)
+    plt.close(fig)
+
+    plt.figure(figsize=(12,8))
+    plt.boxplot(box_bins_pred, positions=box_bin_x, widths=0.5, flierprops=dict({"markersize":3}))
+    plt.xticks(ticks=box_bin_x, labels=box_labels)
+    plt.plot(box_bin_x, mean_x, c="red")
+    plt.plot(box_bin_x, bin_pred_means, c="blue")
+    plt.xlabel("True value (years)")
+    plt.ylabel("Predicted value (years)")
+    plt.tight_layout()
+    ax = plt.gca()
+    ax.spines["right"].set_visible(False)
+    ax.spines["top"].set_visible(False)
+    plt.savefig(plot_path + 'true_vs_pred.jpg', dpi=600)
+    plt.close()
+
+
+def true_vs_pred_scatter(plot_path, target_list, prediction_list):
+    fig = plt.figure(figsize=(12,8))
+    plt.scatter(target_list, prediction_list, s=1)
+    plt.plot(target_list, target_list, c="red")
+    plt.xlabel("True value (years)")
+    plt.ylabel("Predicted value (years)")
+    plt.tight_layout()
+    ax = plt.gca()
+    ax.spines["right"].set_visible(False)
+    ax.spines["top"].set_visible(False)
+    plt.savefig(plot_path + 'true_vs_pred_scatter.jpg', dpi=600)
+    plt.close(fig)
 
 
 @torch.no_grad()
@@ -144,5 +208,11 @@ def evaluate(data_loader, model, criterion, norm_params, device, task, epoch, mo
         for i in data2:
             wf.writerow(i)
     
+    if mode == 'test':
+        true_vs_pred_boxplot(task + "test_", target_list, prediction_list)
+        true_vs_pred_scatter(task + "test_", target_list, prediction_list)    
+    elif epoch % 5 == 0:
+        true_vs_pred_boxplot(task + str(epoch) + "_", target_list, prediction_list)
+
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, mse
 
