@@ -46,6 +46,9 @@ def get_args_parser():
 
     parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT',
                         help='Drop path rate (default: 0.1)')
+    
+    parser.add_argument('--stack', action='store_true', default=False,
+                        help='Use 3D stacks of images as model inputs')
 
     # Optimizer parameters
     parser.add_argument('--clip_grad', type=float, default=None, metavar='NORM',
@@ -135,7 +138,7 @@ def get_args_parser():
 
 
 def main(args):
-    if args.model == 'vit_large_patch16':
+    if args.model == 'vit_large_patch16' or args.model == 'vit_large_patch16_stack':
         assert timm.__version__ == "0.3.2"
 
     misc.init_distributed_mode(args)
@@ -241,10 +244,12 @@ def main(args):
         msg = model.load_state_dict(checkpoint_model, strict=False)
         print(msg)
 
+        stack_keys = set([x for x in msg.missing_keys if x.find("stack") != -1])
         if args.global_pool:
-            assert set(msg.missing_keys) == {'head.weight', 'head.bias', 'fc_norm.weight', 'fc_norm.bias'}
+            assert set(msg.missing_keys) == {'head.weight', 'head.bias', 
+                                             'fc_norm.weight', 'fc_norm.bias'}.union(stack_keys)
         else:
-            assert set(msg.missing_keys) == {'head.weight', 'head.bias'}
+            assert set(msg.missing_keys) == {'head.weight', 'head.bias'}.union(stack_keys)
 
         # manually initialize fc layer
         trunc_normal_(model.head.weight, std=2e-5)
