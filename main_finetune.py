@@ -296,6 +296,8 @@ def main(args):
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     if args.eval:
+        val_stats, val_mse = evaluate(data_loader_val, model, criterion, norm_params,
+                                      device, args.task, epoch=0, mode='val_final')
         test_stats, test_mse = evaluate(data_loader_test, model, criterion, norm_params, 
                                         device, args.task, epoch=0, mode='test')
         exit(0)

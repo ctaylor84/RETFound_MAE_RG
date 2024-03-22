@@ -208,9 +208,12 @@ def evaluate(data_loader, model, criterion, norm_params, device, task, epoch, mo
         for i in data2:
             wf.writerow(i)
     
-    if mode == 'test':
+    if mode == "test":
         true_vs_pred_boxplot(task + "test_", target_list, prediction_list)
-        true_vs_pred_scatter(task + "test_", target_list, prediction_list)    
+        true_vs_pred_scatter(task + "test_", target_list, prediction_list)
+        np.save(task + "test_pred", prediction_list)
+    elif mode == "val_final":
+        np.save(task + "val_pred", prediction_list)
     elif epoch % 5 == 0:
         true_vs_pred_boxplot(task + str(epoch) + "_", target_list, prediction_list)
 
