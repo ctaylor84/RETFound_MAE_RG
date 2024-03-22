@@ -4,27 +4,30 @@
 # --------------------------------------------------------
 
 import os
-from typing import Any, Callable, List, Optional, Tuple, Dict
+from typing import Any, Callable, List, Optional, Tuple, Dict, Union
 import torch
 from torchvision import datasets, transforms
 from timm.data import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 import pandas as pd
+from PIL.ImageOps import mirror
 
 class RegressionDataset(datasets.VisionDataset):
     def __init__(
         self,
         root: str,
         transform: Optional[Callable] = None,
+        flip_str: Union[str, None] = None,
     ) -> None:
         super().__init__(root, transform=transform)
-        self.samples, self.norm_params = self.make_dataset(self.root)
+        self.samples, self.norm_params = self.make_dataset(self.root, flip_str)
         self.loader = datasets.folder.default_loader
 
     @staticmethod
     def make_dataset(
         directory: str,
-    ) -> Tuple[List[Tuple[str, int]], Dict[str, torch.Tensor]]:
+        flip_str: Union[str, None],
+    ) -> Tuple[List[Tuple[str, int, bool]], Dict[str, torch.Tensor]]:
         directory = os.path.expanduser(directory)
 
         targets_df = pd.read_csv(directory + ".csv", header=0,
@@ -34,7 +37,8 @@ class RegressionDataset(datasets.VisionDataset):
         instances = list()
         for target_file, target_value in targets.items():
             path = os.path.join(directory, target_file)
-            item = path, target_value
+            flip = flip_str is not None and target_file.find(flip_str) != -1
+            item = path, target_value, flip
             instances.append(item)
 
         target_values = torch.tensor(list(targets.values()))
@@ -45,8 +49,10 @@ class RegressionDataset(datasets.VisionDataset):
         return instances, norm_params
     
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
-        path, target = self.samples[index]
+        path, target, flip = self.samples[index]
         sample = self.loader(path)
+        if flip:
+            sample = mirror(sample)
         if self.transform is not None:
             sample = self.transform(sample)
         
@@ -109,9 +115,10 @@ def build_dataset(is_train, args):
     
     transform = build_transform(is_train, args)
     root = os.path.join(args.data_path, is_train)
+    flip_str = args.flip_str
 
     if not args.stack:
-        dataset = RegressionDataset(root, transform=transform)
+        dataset = RegressionDataset(root, transform=transform, flip_str=flip_str)
     else:
         dataset = RegressionStackDataset(root, transform=transform)
 

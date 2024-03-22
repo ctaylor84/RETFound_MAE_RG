@@ -136,3 +136,6 @@ finetune_IDRiD/
 output_dir/
 output_dir./
 scripts/
+datasets/
+finetune/
+eval/
