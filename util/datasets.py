@@ -60,56 +60,6 @@ class RegressionDataset(datasets.VisionDataset):
     
     def __len__(self) -> int:
         return len(self.samples)
-    
-class RegressionStackDataset(datasets.VisionDataset):
-    def __init__(
-        self,
-        root: str,
-        transform: Optional[Callable] = None,
-    ) -> None:
-        super().__init__(root, transform=transform)
-        self.samples, self.norm_params = self.make_dataset(self.root)
-        self.loader = datasets.folder.default_loader
-
-    @staticmethod
-    def make_dataset(
-        directory: str,
-    ) -> Tuple[List[Tuple[str, int]], Dict[str, torch.Tensor]]:
-        directory = os.path.expanduser(directory)
-
-        targets_df = pd.read_csv(directory + ".csv", header=0,
-                                 dtype={"stack": str, "target": float})
-        targets = dict(zip(targets_df["stack"], targets_df["target"]))
-
-        instances = list()
-        for target_stack, target_value in targets.items():
-            stack_paths = list()
-            for target_file in target_stack.split(":"):
-                path = os.path.join(directory, target_file)
-                stack_paths.append(path)
-            item = stack_paths, target_value
-            instances.append(item)
-
-        target_values = torch.tensor(list(targets.values()))
-        dataset_mean = torch.mean(target_values)
-        dataset_std = torch.std(target_values)
-        norm_params = {"mean": dataset_mean, "std": dataset_std}
-
-        return instances, norm_params
-    
-    def __getitem__(self, index: int) -> Tuple[Any, Any]:
-        stack_paths, target = self.samples[index]
-        sample = [self.loader(path) for path in stack_paths]
-
-        if self.transform is not None:
-            for i in range(len(sample)):
-                sample[i] = self.transform(sample[i])
-
-        sample = torch.stack(sample)
-        return sample, target
-    
-    def __len__(self) -> int:
-        return len(self.samples)
 
 def build_dataset(is_train, args):
     
@@ -117,11 +67,7 @@ def build_dataset(is_train, args):
     root = os.path.join(args.data_path, is_train)
     flip_str = args.flip_str
 
-    if not args.stack:
-        dataset = RegressionDataset(root, transform=transform, flip_str=flip_str)
-    else:
-        dataset = RegressionStackDataset(root, transform=transform)
-
+    dataset = RegressionDataset(root, transform=transform, flip_str=flip_str)
     return dataset
 
 
