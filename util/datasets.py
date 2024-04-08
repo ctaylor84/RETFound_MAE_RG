@@ -16,29 +16,41 @@ class RegressionDataset(datasets.VisionDataset):
     def __init__(
         self,
         root: str,
+        subset: str,
         transform: Optional[Callable] = None,
         flip_str: Union[str, None] = None,
     ) -> None:
-        super().__init__(root, transform=transform)
-        self.samples, self.norm_params = self.make_dataset(self.root, flip_str)
+        super().__init__(os.path.join(root, "images"), transform=transform)
+        self.samples, self.norm_params = self.make_dataset(root, subset, flip_str)
         self.loader = datasets.folder.default_loader
 
     @staticmethod
     def make_dataset(
         directory: str,
+        subset: str,
         flip_str: Union[str, None],
     ) -> Tuple[List[Tuple[str, int, bool]], Dict[str, torch.Tensor]]:
         directory = os.path.expanduser(directory)
+        image_dir = os.path.join(directory, "images")
+        subset_csv = os.path.join(directory, subset + ".csv")
 
-        targets_df = pd.read_csv(directory + ".csv", header=0,
+        targets_df = pd.read_csv(subset_csv, header=0,
                                  dtype={"file": str, "target": float})
         targets = dict(zip(targets_df["file"], targets_df["target"]))
 
         instances = list()
         for target_file, target_value in targets.items():
-            path = os.path.join(directory, target_file)
-            flip = flip_str is not None and target_file.find(flip_str) != -1
-            item = path, target_value, flip
+            paths = list()
+            flip_list = list()
+            for sub_file in target_file.split(":"):
+                paths.append(
+                    os.path.join(image_dir, sub_file)
+                )
+                flip_list.append(
+                    flip_str is not None and sub_file.find(flip_str) != -1
+                )
+
+            item = paths, target_value, flip_list
             instances.append(item)
 
         target_values = torch.tensor(list(targets.values()))
@@ -49,25 +61,34 @@ class RegressionDataset(datasets.VisionDataset):
         return instances, norm_params
     
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
-        path, target, flip = self.samples[index]
-        sample = self.loader(path)
-        if flip:
-            sample = mirror(sample)
-        if self.transform is not None:
-            sample = self.transform(sample)
+        paths, target, flip_list = self.samples[index]
+        sample_array = list()
+        for path, flip in zip(paths, flip_list):
+            sample = self.loader(path)
+            if flip:
+                sample = mirror(sample)
+            sample_array.append(sample)
         
-        return sample, target
+        if self.transform is not None:
+            for i in range(len(sample_array)):
+                sample_array[i] = self.transform(sample_array[i])
+        
+        if len(sample_array) > 1:
+            sample_array = torch.stack(sample_array)
+        else:
+            sample_array = sample_array[0]
+        return sample_array, target
     
     def __len__(self) -> int:
         return len(self.samples)
 
 def build_dataset(is_train, args):
-    
-    transform = build_transform(is_train, args)
-    root = os.path.join(args.data_path, is_train)
-    flip_str = args.flip_str
-
-    dataset = RegressionDataset(root, transform=transform, flip_str=flip_str)
+    dataset = RegressionDataset(
+        args.data_path,
+        is_train, 
+        transform=build_transform(is_train, args), 
+        flip_str=args.flip_str
+    )
     return dataset
 
 
