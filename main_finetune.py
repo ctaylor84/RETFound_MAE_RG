@@ -46,6 +46,9 @@ def get_args_parser():
 
     parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT',
                         help='Drop path rate (default: 0.1)')
+    
+    parser.add_argument('--stack', action='store_true', default=False,
+                        help='Use 3D stacks of images as model inputs')
 
     # Optimizer parameters
     parser.add_argument('--clip_grad', type=float, default=None, metavar='NORM',
@@ -98,6 +101,10 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data_path', default='/home/jupyter/Mor_DR_data/data/data/IDRID/Disease_Grading/', type=str,
                         help='dataset path')
+    parser.add_argument('--norm_mean', default=None, type=float,
+                        help='Target variable normalization mean. By default the training set mean is used.')
+    parser.add_argument('--norm_std', default=None, type=float,
+                        help='Target variable normalization std. By default the training set mean is used.')
 
     parser.add_argument('--output_dir', default='./output_dir',
                         help='path where to save, empty for no saving')
@@ -137,7 +144,7 @@ def get_args_parser():
 
 
 def main(args):
-    if args.model == 'vit_large_patch16':
+    if args.model == 'vit_large_patch16' or args.model == 'vit_large_patch16_stack':
         assert timm.__version__ == "0.3.2"
 
     misc.init_distributed_mode(args)
@@ -155,9 +162,15 @@ def main(args):
     cudnn.benchmark = True
 
     dataset_train = build_dataset(is_train='train', args=args)
-    norm_params = dataset_train.norm_params
     dataset_val = build_dataset(is_train='val', args=args)
     dataset_test = build_dataset(is_train='test', args=args)
+
+    if args.norm_mean is None or args.norm_std is None:
+        norm_params = dataset_train.norm_params
+        print("Using training set normalization parameters:", norm_params)
+    else:
+        norm_params = {"mean": args.norm_mean, "std": args.norm_std}
+        print("Using custom normalization parameters:", norm_params)
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
@@ -242,12 +255,6 @@ def main(args):
         # load pre-trained model
         msg = model.load_state_dict(checkpoint_model, strict=False)
         print(msg)
-
-        if args.global_pool:
-            assert set(msg.missing_keys) == {'head.weight', 'head.bias', 
-                                             'fc_norm.weight', 'fc_norm.bias'}
-        else:
-            assert set(msg.missing_keys) == {'head.weight', 'head.bias'}
 
         # manually initialize fc layer
         trunc_normal_(model.head.weight, std=2e-5)
