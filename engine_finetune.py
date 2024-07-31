@@ -175,7 +175,7 @@ def evaluate(data_loader, model, criterion, norm_params, device, task, epoch, mo
 
         # compute output
         with torch.cuda.amp.autocast():
-            output = model(images).squeeze()
+            output = model(images).squeeze(dim=1)
             loss = criterion(output, (target - norm_params["mean"]) / norm_params["std"])
             output_np = ((output * norm_params["std"]) + norm_params["mean"]).cpu().detach().numpy()
             target_np = target.cpu().detach().numpy()
