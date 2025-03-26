@@ -8,64 +8,20 @@ import sys
 import csv
 import os
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from timm.data import Mixup
-from timm.utils import accuracy
-from typing import Iterable, Optional
+from typing import Iterable
 import util.misc as misc
 import util.lr_sched as lr_sched
-from sklearn.metrics import accuracy_score, roc_auc_score, f1_score, average_precision_score,multilabel_confusion_matrix
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from pycm import *
-import matplotlib.pyplot as plt
 import numpy as np
-
-
-
-
-def misc_measures(confusion_matrix):
-    
-    acc = []
-    sensitivity = []
-    specificity = []
-    precision = []
-    G = []
-    F1_score_2 = []
-    mcc_ = []
-    
-    for i in range(1, confusion_matrix.shape[0]):
-        cm1=confusion_matrix[i]
-        acc.append(1.*(cm1[0,0]+cm1[1,1])/np.sum(cm1))
-        sensitivity_ = 1.*cm1[1,1]/(cm1[1,0]+cm1[1,1])
-        sensitivity.append(sensitivity_)
-        specificity_ = 1.*cm1[0,0]/(cm1[0,1]+cm1[0,0])
-        specificity.append(specificity_)
-        precision_ = 1.*cm1[1,1]/(cm1[1,1]+cm1[0,1])
-        precision.append(precision_)
-        G.append(np.sqrt(sensitivity_*specificity_))
-        F1_score_2.append(2*precision_*sensitivity_/(precision_+sensitivity_))
-        mcc = (cm1[0,0]*cm1[1,1]-cm1[0,1]*cm1[1,0])/np.sqrt((cm1[0,0]+cm1[0,1])*(cm1[0,0]+cm1[1,0])*(cm1[1,1]+cm1[1,0])*(cm1[1,1]+cm1[0,1]))
-        mcc_.append(mcc)
-        
-    acc = np.array(acc).mean()
-    sensitivity = np.array(sensitivity).mean()
-    specificity = np.array(specificity).mean()
-    precision = np.array(precision).mean()
-    G = np.array(G).mean()
-    F1_score_2 = np.array(F1_score_2).mean()
-    mcc_ = np.array(mcc_).mean()
-    
-    return acc, sensitivity, specificity, precision, G, F1_score_2, mcc_
-
-
+import matplotlib.pyplot as plt
 
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
-                    mixup_fn: Optional[Mixup] = None, log_writer=None,
-                    args=None):
+                    device: torch.device, epoch: int, loss_scaler, norm_params,
+                    max_norm: float = 0, log_writer=None, args=None):
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -86,14 +42,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
         samples = samples.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
-
-        if mixup_fn is not None:
-            samples, targets = mixup_fn(samples, targets)
+        targets = targets.to(device=device, dtype=torch.float, non_blocking=True)
 
         with torch.cuda.amp.autocast():
-            outputs = model(samples)
-            loss = criterion(outputs, targets)
+            outputs = model(samples).squeeze()
+            loss = criterion(outputs, (targets - norm_params["mean"]) / norm_params["std"])
 
         loss_value = loss.item()
 
@@ -134,22 +87,82 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
+def true_vs_pred_boxplot(plot_path, target_list, prediction_list):
+    value_max = round(np.amax(target_list))
+    value_min = round(np.amin(target_list))
+    total_bins = value_max - value_min
+    bins = np.arange(value_min, value_max+2, step=1.0) - 0.5
+    digitized = np.digitize(target_list, bins)
+    residuals_list = target_list - prediction_list
+
+    mean_x = np.arange(value_min, value_max-1)
+    bin_loss_means = [np.mean(residuals_list[digitized == i]) for i in range(1, total_bins)]
+    bin_pred_means = [np.mean(prediction_list[digitized == i]) for i in range(1, total_bins)]
+    box_bins_loss = [residuals_list[digitized == i] for i in range(1, total_bins)]
+    box_bins_pred = [prediction_list[digitized == i] for i in range(1, total_bins)]
+    box_bins_counts = [target_list[digitized == i].shape[0] for i in range(1, total_bins)]
+    box_bin_x = list(range(1, total_bins))
+
+    box_labels = ["" if int(x) % 5 != 0 else str(x) for x in mean_x]
+    fig = plt.figure(figsize=(12,8))
+    ax = fig.add_subplot(111)
+    ax.boxplot(box_bins_loss, positions=box_bin_x, widths=0.5, flierprops=dict({"markersize":3}))
+    ax.set_xticks(ticks=box_bin_x)
+    ax.set_xticklabels(labels=box_labels)
+    ax.plot(box_bin_x, bin_loss_means, c="blue")
+    ax.plot(box_bin_x, np.zeros(len(box_bin_x)), c="red")
+    ax.set_xlabel("True value (years)")
+    ax.set_ylabel("Residual (years)")
+    ax.tick_params(axis="x", which="minor", bottom=False)
+    ax2 = ax.twinx()
+    ax2.plot(box_bin_x, box_bins_counts, c="green")
+    ax2.set_ylabel("Number of samples")
+    ax2.yaxis.get_ticklocs(minor=True)
+    ax2.minorticks_on()
+    ax2.tick_params(axis="x", which="minor", bottom=False)
+    plt.tight_layout()
+    plt.savefig(plot_path + 'residuals.jpg', dpi=600)
+    plt.close(fig)
+
+    plt.figure(figsize=(12,8))
+    plt.boxplot(box_bins_pred, positions=box_bin_x, widths=0.5, flierprops=dict({"markersize":3}))
+    plt.xticks(ticks=box_bin_x, labels=box_labels)
+    plt.plot(box_bin_x, mean_x, c="red")
+    plt.plot(box_bin_x, bin_pred_means, c="blue")
+    plt.xlabel("True value (years)")
+    plt.ylabel("Predicted value (years)")
+    plt.tight_layout()
+    ax = plt.gca()
+    ax.spines["right"].set_visible(False)
+    ax.spines["top"].set_visible(False)
+    plt.savefig(plot_path + 'true_vs_pred.jpg', dpi=600)
+    plt.close()
+
+
+def true_vs_pred_scatter(plot_path, target_list, prediction_list):
+    fig = plt.figure(figsize=(12,8))
+    plt.scatter(target_list, prediction_list, s=1)
+    plt.plot(target_list, target_list, c="red")
+    plt.xlabel("True value (years)")
+    plt.ylabel("Predicted value (years)")
+    plt.tight_layout()
+    ax = plt.gca()
+    ax.spines["right"].set_visible(False)
+    ax.spines["top"].set_visible(False)
+    plt.savefig(plot_path + 'true_vs_pred_scatter.jpg', dpi=600)
+    plt.close(fig)
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device, task, epoch, mode, num_class):
-    criterion = torch.nn.CrossEntropyLoss()
-
+def evaluate(data_loader, model, criterion, norm_params, device, task, epoch, mode):
     metric_logger = misc.MetricLogger(delimiter="  ")
     header = 'Test:'
     
     if not os.path.exists(task):
         os.makedirs(task)
 
-    prediction_decode_list = []
-    prediction_list = []
-    true_label_decode_list = []
-    true_label_onehot_list = []
+    prediction_list = list()
+    target_list = list()
     
     # switch to evaluation mode
     model.eval()
@@ -159,50 +172,50 @@ def evaluate(data_loader, model, device, task, epoch, mode, num_class):
         target = batch[-1]
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
-        true_label=F.one_hot(target.to(torch.int64), num_classes=num_class)
 
         # compute output
         with torch.cuda.amp.autocast():
-            output = model(images)
-            loss = criterion(output, target)
-            prediction_softmax = nn.Softmax(dim=1)(output)
-            _,prediction_decode = torch.max(prediction_softmax, 1)
-            _,true_label_decode = torch.max(true_label, 1)
+            output = model(images).squeeze(dim=1)
+            loss = criterion(output, (target - norm_params["mean"]) / norm_params["std"])
+            output_np = ((output * norm_params["std"]) + norm_params["mean"]).cpu().detach().numpy()
+            target_np = target.cpu().detach().numpy()
+            prediction_list.append(output_np)
+            target_list.append(target_np)
 
-            prediction_decode_list.extend(prediction_decode.cpu().detach().numpy())
-            true_label_decode_list.extend(true_label_decode.cpu().detach().numpy())
-            true_label_onehot_list.extend(true_label.cpu().detach().numpy())
-            prediction_list.extend(prediction_softmax.cpu().detach().numpy())
-
-        acc1,_ = accuracy(output, target, topk=(1,2))
+        batch_rmse = mean_squared_error(target_np, output_np, squared=False)
+        batch_r2 = r2_score(target_np, output_np)
 
         batch_size = images.shape[0]
         metric_logger.update(loss=loss.item())
-        metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
-    # gather the stats from all processes
-    true_label_decode_list = np.array(true_label_decode_list)
-    prediction_decode_list = np.array(prediction_decode_list)
-    confusion_matrix = multilabel_confusion_matrix(true_label_decode_list, prediction_decode_list,labels=[i for i in range(num_class)])
-    acc, sensitivity, specificity, precision, G, F1, mcc = misc_measures(confusion_matrix)
+        metric_logger.meters['rmse'].update(batch_rmse, n=batch_size)
+        metric_logger.meters['r2'].update(batch_r2, n=batch_size)
     
-    auc_roc = roc_auc_score(true_label_onehot_list, prediction_list,multi_class='ovr',average='macro')
-    auc_pr = average_precision_score(true_label_onehot_list, prediction_list,average='macro')          
-            
+    prediction_list = np.concatenate(prediction_list)
+    target_list = np.concatenate(target_list)
+    
+    rmse = mean_squared_error(target_list, prediction_list, squared=False)
+    mse = mean_squared_error(target_list, prediction_list)
+    mae = mean_absolute_error(target_list, prediction_list)
+    r2 = r2_score(target_list, prediction_list)
+
     metric_logger.synchronize_between_processes()
     
-    print('Sklearn Metrics - Acc: {:.4f} AUC-roc: {:.4f} AUC-pr: {:.4f} F1-score: {:.4f} MCC: {:.4f}'.format(acc, auc_roc, auc_pr, F1, mcc)) 
+    print('Sklearn Metrics - RMSE: {:.4f} MSE: {:.4f} MAE: {:.4f} r2: {:.4f}'.format(rmse, mse, mae, r2)) 
     results_path = task+'_metrics_{}.csv'.format(mode)
     with open(results_path,mode='a',newline='',encoding='utf8') as cfa:
         wf = csv.writer(cfa)
-        data2=[[acc,sensitivity,specificity,precision,auc_roc,auc_pr,F1,mcc,metric_logger.loss]]
+        data2=[[rmse, mse, mae, r2, metric_logger.loss]]
         for i in data2:
             wf.writerow(i)
-            
     
-    if mode=='test':
-        cm = ConfusionMatrix(actual_vector=true_label_decode_list, predict_vector=prediction_decode_list)
-        cm.plot(cmap=plt.cm.Blues,number_label=True,normalized=True,plot_lib="matplotlib")
-        plt.savefig(task+'confusion_matrix_test.jpg',dpi=600,bbox_inches ='tight')
-    
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()},auc_roc
+    if mode == "test":
+        true_vs_pred_boxplot(task + "test_", target_list, prediction_list)
+        true_vs_pred_scatter(task + "test_", target_list, prediction_list)
+        np.save(task + "test_pred", prediction_list)
+    elif mode == "val_final":
+        np.save(task + "val_pred", prediction_list)
+    elif epoch % 5 == 0:
+        true_vs_pred_boxplot(task + str(epoch) + "_", target_list, prediction_list)
+
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, mse
 

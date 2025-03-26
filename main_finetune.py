@@ -16,11 +16,7 @@ import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 
 import timm
-
-assert timm.__version__ == "0.3.2" # version check
 from timm.models.layers import trunc_normal_
-from timm.data.mixup import Mixup
-from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 
 import util.lr_decay as lrd
 import util.misc as misc
@@ -34,7 +30,7 @@ from engine_finetune import train_one_epoch, evaluate
 
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('MAE fine-tuning for image classification', add_help=False)
+    parser = argparse.ArgumentParser('MAE fine-tuning for image regression', add_help=False)
     parser.add_argument('--batch_size', default=64, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=50, type=int)
@@ -50,6 +46,9 @@ def get_args_parser():
 
     parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT',
                         help='Drop path rate (default: 0.1)')
+    
+    parser.add_argument('--stack', action='store_true', default=False,
+                        help='Use 3D stacks of images as model inputs')
 
     # Optimizer parameters
     parser.add_argument('--clip_grad', type=float, default=None, metavar='NORM',
@@ -61,22 +60,23 @@ def get_args_parser():
                         help='learning rate (absolute lr)')
     parser.add_argument('--blr', type=float, default=1e-3, metavar='LR',
                         help='base learning rate: absolute_lr = base_lr * total_batch_size / 256')
-    parser.add_argument('--layer_decay', type=float, default=0.75,
-                        help='layer-wise lr decay from ELECTRA/BEiT')
+    parser.add_argument('--layer_decay', type=float, default=None,
+                        help='layer-wise lr decay from ELECTRA/BEiT (default: None)')
 
     parser.add_argument('--min_lr', type=float, default=1e-6, metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0')
 
     parser.add_argument('--warmup_epochs', type=int, default=10, metavar='N',
                         help='epochs to warmup LR')
+    
+    parser.add_argument('--eps', type=float, default=1e-08,
+                        help='Optimizer EPS (default: 1e-08)')
 
     # Augmentation parameters
     parser.add_argument('--color_jitter', type=float, default=None, metavar='PCT',
                         help='Color jitter factor (enabled only when not using Auto/RandAug)')
     parser.add_argument('--aa', type=str, default='rand-m9-mstd0.5-inc1', metavar='NAME',
-                        help='Use AutoAugment policy. "v0" or "original". " + "(default: rand-m9-mstd0.5-inc1)'),
-    parser.add_argument('--smoothing', type=float, default=0.1,
-                        help='Label smoothing (default: 0.1)')
+                        help='Use AutoAugment policy. "v0" or "original". " + "(default: rand-m9-mstd0.5-inc1)')
 
     # * Random Erase params
     parser.add_argument('--reprob', type=float, default=0.25, metavar='PCT',
@@ -87,20 +87,6 @@ def get_args_parser():
                         help='Random erase count (default: 1)')
     parser.add_argument('--resplit', action='store_true', default=False,
                         help='Do not random erase first (clean) augmentation split')
-
-    # * Mixup params
-    parser.add_argument('--mixup', type=float, default=0,
-                        help='mixup alpha, mixup enabled if > 0.')
-    parser.add_argument('--cutmix', type=float, default=0,
-                        help='cutmix alpha, cutmix enabled if > 0.')
-    parser.add_argument('--cutmix_minmax', type=float, nargs='+', default=None,
-                        help='cutmix min/max ratio, overrides alpha and enables cutmix if set (default: None)')
-    parser.add_argument('--mixup_prob', type=float, default=1.0,
-                        help='Probability of performing mixup or cutmix when either/both is enabled')
-    parser.add_argument('--mixup_switch_prob', type=float, default=0.5,
-                        help='Probability of switching to cutmix when both mixup and cutmix enabled')
-    parser.add_argument('--mixup_mode', type=str, default='batch',
-                        help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
 
     # * Finetuning params
     parser.add_argument('--finetune', default='',type=str,
@@ -115,8 +101,10 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data_path', default='/home/jupyter/Mor_DR_data/data/data/IDRID/Disease_Grading/', type=str,
                         help='dataset path')
-    parser.add_argument('--nb_classes', default=1000, type=int,
-                        help='number of the classification types')
+    parser.add_argument('--norm_mean', default=None, type=float,
+                        help='Target variable normalization mean. By default the training set mean is used.')
+    parser.add_argument('--norm_std', default=None, type=float,
+                        help='Target variable normalization std. By default the training set mean is used.')
 
     parser.add_argument('--output_dir', default='./output_dir',
                         help='path where to save, empty for no saving')
@@ -139,11 +127,15 @@ def get_args_parser():
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
     parser.set_defaults(pin_mem=True)
+    parser.add_argument('--flip_str', default=None,
+                         help='Horizontally flip images that include this string')
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--local_rank', default=-1, type=int)
+    parser.add_argument('--dist_backend', default='nccl',
+                        choices=['nccl', 'gloo'])
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
@@ -152,6 +144,9 @@ def get_args_parser():
 
 
 def main(args):
+    if args.model == 'vit_large_patch16':
+        assert timm.__version__ == "0.3.2"
+
     misc.init_distributed_mode(args)
 
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
@@ -169,6 +164,13 @@ def main(args):
     dataset_train = build_dataset(is_train='train', args=args)
     dataset_val = build_dataset(is_train='val', args=args)
     dataset_test = build_dataset(is_train='test', args=args)
+
+    if args.norm_mean is None or args.norm_std is None:
+        norm_params = dataset_train.norm_params
+        print("Using training set normalization parameters:", norm_params)
+    else:
+        norm_params = {"mean": args.norm_mean, "std": args.norm_std}
+        print("Using custom normalization parameters:", norm_params)
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
@@ -228,19 +230,10 @@ def main(args):
         drop_last=False
     )
     
-    
-    mixup_fn = None
-    mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
-    if mixup_active:
-        print("Mixup is activated!")
-        mixup_fn = Mixup(
-            mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
-            prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
-            label_smoothing=args.smoothing, num_classes=args.nb_classes)
-    
+    nb_targets = 1 # Currently limited to one regression target
     model = models_vit.__dict__[args.model](
         img_size=args.input_size,
-        num_classes=args.nb_classes,
+        num_classes=nb_targets,
         drop_path_rate=args.drop_path,
         global_pool=args.global_pool,
     )
@@ -262,11 +255,6 @@ def main(args):
         # load pre-trained model
         msg = model.load_state_dict(checkpoint_model, strict=False)
         print(msg)
-
-        if args.global_pool:
-            assert set(msg.missing_keys) == {'head.weight', 'head.bias', 'fc_norm.weight', 'fc_norm.bias'}
-        else:
-            assert set(msg.missing_keys) == {'head.weight', 'head.bias'}
 
         # manually initialize fc layer
         trunc_normal_(model.head.weight, std=2e-5)
@@ -294,48 +282,50 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
 
-    # build optimizer with layer-wise lr decay (lrd)
-    param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay,
-        no_weight_decay_list=model_without_ddp.no_weight_decay(),
-        layer_decay=args.layer_decay
-    )
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
-    loss_scaler = NativeScaler()
-
-    if mixup_fn is not None:
-        # smoothing is handled with mixup label transform
-        criterion = SoftTargetCrossEntropy()
-    elif args.smoothing > 0.:
-        criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
+    if args.layer_decay is not None:
+        # build optimizer with layer-wise lr decay (lrd)
+        param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay,
+            no_weight_decay_list=model_without_ddp.no_weight_decay(), # type: ignore
+            layer_decay=args.layer_decay
+        )
+        optimizer = torch.optim.AdamW(param_groups, lr=args.lr, eps=args.eps)
     else:
-        criterion = torch.nn.CrossEntropyLoss()
+        optimizer = torch.optim.AdamW(model_without_ddp.parameters(), lr=args.lr, eps=args.eps,
+                                      weight_decay=args.weight_decay)
+
+    loss_scaler = NativeScaler()
+    criterion = torch.nn.MSELoss()
 
     print("criterion = %s" % str(criterion))
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     if args.eval:
-        test_stats,auc_roc = evaluate(data_loader_test, model, device, args.task, epoch=0, mode='test',num_class=args.nb_classes)
+        val_stats, val_mse = evaluate(data_loader_val, model, criterion, norm_params,
+                                      device, args.task, epoch=0, mode='val_final')
+        test_stats, test_mse = evaluate(data_loader_test, model, criterion, norm_params, 
+                                        device, args.task, epoch=0, mode='test')
         exit(0)
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-    max_accuracy = 0.0
-    max_auc = 0.0
+    min_mse = None
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
         train_stats = train_one_epoch(
             model, criterion, data_loader_train,
             optimizer, device, epoch, loss_scaler,
-            args.clip_grad, mixup_fn,
+            norm_params,
+            args.clip_grad,
             log_writer=log_writer,
             args=args
         )
 
-        val_stats,val_auc_roc = evaluate(data_loader_val, model, device,args.task,epoch, mode='val',num_class=args.nb_classes)
-        if max_auc<val_auc_roc:
-            max_auc = val_auc_roc
+        val_stats, val_mse = evaluate(data_loader_val, model, criterion, norm_params,
+                                      device, args.task, epoch, mode='val')
+        if min_mse == None or val_mse < min_mse:
+            min_mse = val_mse
             
             if args.output_dir:
                 misc.save_model(
@@ -344,12 +334,13 @@ def main(args):
         
 
         if epoch==(args.epochs-1):
-            test_stats,auc_roc = evaluate(data_loader_test, model, device,args.task,epoch, mode='test',num_class=args.nb_classes)
+            test_stats, test_mse = evaluate(data_loader_test, model, criterion, norm_params,
+                                            device, args.task, epoch, mode='test')
 
         
         if log_writer is not None:
-            log_writer.add_scalar('perf/val_acc1', val_stats['acc1'], epoch)
-            log_writer.add_scalar('perf/val_auc', val_auc_roc, epoch)
+            log_writer.add_scalar('perf/val_rmse', val_stats['rmse'], epoch)
+            log_writer.add_scalar('perf/val_r2', val_stats['r2'], epoch)
             log_writer.add_scalar('perf/val_loss', val_stats['loss'], epoch)
             
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},

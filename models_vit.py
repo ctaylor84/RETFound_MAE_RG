@@ -7,6 +7,7 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import timm.models.vision_transformer
 
@@ -53,3 +54,49 @@ def vit_large_patch16(**kwargs):
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
+def vit_base_patch16_pt(**kwargs):
+    model = timm.create_model("vit_base_patch16_224", pretrained=True,
+                              num_classes=kwargs["num_classes"])
+    return model
+
+def vit_large_patch16_pt(**kwargs):
+    model = timm.create_model("vit_large_patch16_224", pretrained=True,
+                              num_classes=kwargs["num_classes"])
+    return model
+
+def vit_small_patch16_pt(**kwargs):
+    model = timm.create_model("vit_small_patch16_224", pretrained=True,
+                              num_classes=kwargs["num_classes"])
+    return model
+
+def efficientnetv2_m(**kwargs):
+    model = timm.create_model("efficientnetv2_rw_m", pretrained=True,
+                              num_classes=kwargs["num_classes"])
+    return model
+
+def resnet50(**kwargs):
+    model = timm.create_model("resnet50", pretrained=True,
+                              num_classes=kwargs["num_classes"])
+    return model
+
+
+class VisionTransformerSiamese(VisionTransformer):
+    def __init__(self, **kwargs):
+        super(VisionTransformerSiamese, self).__init__(**kwargs)
+        self.head = nn.Linear(kwargs["embed_dim"] * 2, kwargs["num_classes"])
+
+    def forward(self, x):
+        assert len(x.shape) == 5 and x.shape[1] == 2
+        y, z = x[:, 0], x[:, 1]
+        y = self.forward_features(y)
+        z = self.forward_features(z)
+        x = torch.cat((y, z), dim=1)
+        x = self.head(x)
+        return x
+
+
+def vit_large_patch16_siamese(**kwargs):
+    model = VisionTransformerSiamese(
+        patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    return model
